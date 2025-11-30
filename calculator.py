@@ -1,168 +1,258 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib import cm
 import sympy as sp
-import sys
 
-class SurfaceAnalyzer:
-    """
-    Clase para manejar el análisis, cálculo y visualización de funciones de dos variables.
-    """
-    
-    def __init__(self, func_str, x_range, y_range, points=100):
-        """
-        Inicializa el analizador.
-        
-        :param func_str: Cadena con la función, ej: "sin(x)*cos(y)"
-        :param x_range: Tupla (min, max) para el eje X
-        :param y_range: Tupla (min, max) para el eje Y
-        :param points: Número de puntos para la malla (resolución)
-        """
-        self.func_str = func_str
-        self.x_range = x_range
-        self.y_range = y_range
-        self.points = points
-        
-        # Variables simbólicas
+# ==========================================
+# LÓGICA DE CÁLCULO (Backend)
+# ==========================================
+class SurfaceBackend:
+    def __init__(self):
         self.x_sym, self.y_sym = sp.symbols('x y')
         self.func_lambda = None
-        self.X, self.Y, self.Z = None, None, None
+        self.expr_str = ""
 
-    def parse_function(self):
-        """
-        Convierte la cadena de texto en una función vectorizada de Numpy.
-        Maneja errores de sintaxis matemática.
-        """
+    def parse_function(self, func_str):
         try:
-            # Convertir string a expresión simbólica de Sympy
-            expr = sp.sympify(self.func_str)
-            
-            # Validar que no haya variables desconocidas
+            expr = sp.sympify(func_str)
+            self.expr_str = str(expr)
             free_symbols = expr.free_symbols
+            # Permitimos pi y e como constantes, no variables
             if not free_symbols.issubset({self.x_sym, self.y_sym}):
-                raise ValueError(f"La función contiene variables no permitidas. Use solo 'x' e 'y'. Encontrado: {free_symbols}")
-
-            # Convertir a función lambda compatible con numpy
-            # modules='numpy' asegura que funciones como sin, exp usen la versión de numpy
+                return False, f"Variables desconocidas. Use solo 'x' e 'y'. Encontrado: {free_symbols}"
             self.func_lambda = sp.lambdify((self.x_sym, self.y_sym), expr, modules='numpy')
-            
-            print(f"[INFO] Función interpretada correctamente: f(x,y) = {expr}")
-            
+            return True, "Función interpretada correctamente."
         except Exception as e:
-            print(f"[ERROR] No se pudo interpretar la función: {e}")
-            sys.exit(1)
+            return False, str(e)
 
-    def generate_mesh(self):
-        """
-        Genera la malla de coordenadas y evalúa la función Z = f(X, Y).
-        """
+    def get_cartesian_data(self, x_range, y_range, points=100):
+        """Genera malla cuadrada exacta basada en los límites del usuario"""
+        x = np.linspace(x_range[0], x_range[1], points)
+        y = np.linspace(y_range[0], y_range[1], points)
+        X, Y = np.meshgrid(x, y)
+        Z = self.evaluate_z(X, Y)
+        return X, Y, Z
+
+    def get_polar_data(self, limit, points=80):
+        """Genera malla circular para graficar bordes PERFECTOS (Lisos)"""
+        # Radio va de 0 al límite
+        r = np.linspace(0, limit, points)
+        # Angulo va de 0 a 2pi (círculo completo)
+        theta = np.linspace(0, 2*np.pi, points)
+        
+        R, Theta = np.meshgrid(r, theta)
+        
+        # Convertir a Cartesiano para que matplotlib entienda
+        X = R * np.cos(Theta)
+        Y = R * np.sin(Theta)
+        
+        Z = self.evaluate_z(X, Y)
+        return X, Y, Z
+
+    def evaluate_z(self, X, Y):
         try:
-            x = np.linspace(self.x_range[0], self.x_range[1], self.points)
-            y = np.linspace(self.y_range[0], self.y_range[1], self.points)
-            
-            self.X, self.Y = np.meshgrid(x, y)
-            
-            # Evaluar Z. Se maneja el caso de funciones constantes o de una sola variable
-            # transmitiendo la forma correcta si es necesario.
-            self.Z = self.func_lambda(self.X, self.Y)
-            
-            # Si la función devuelve un escalar (ej: f(x,y) = 5), llenar el array
-            if np.isscalar(self.Z):
-                self.Z = np.full_like(self.X, self.Z)
-            # Si devuelve forma incorrecta (ej: f(x,y) = x), asegurar broadcast
-            elif self.Z.shape != self.X.shape:
-                 self.Z = np.broadcast_to(self.Z, self.X.shape)
-                 
+            Z = self.func_lambda(X, Y)
+            if np.isscalar(Z): Z = np.full_like(X, Z)
+            elif Z.shape != X.shape: Z = np.broadcast_to(Z, X.shape)
+            return Z
         except Exception as e:
-            print(f"[ERROR] Error matemático al evaluar la función (posible división por cero o dominio inválido): {e}")
-            sys.exit(1)
+            raise ValueError(f"Error al evaluar: {e}")
 
-    def calculate_volume_trapezoidal(self):
-        """
-        Calcula el volumen bajo la superficie usando la regla del trapecio doble con Numpy.
-        Integral doble aproximada: ∫∫ f(x,y) dA
-        """
-        # Paso 1: Integrar a lo largo del eje X (axis=1 en meshgrid standard) para cada Y
-        # np.trapz(y, x=coordenadas)
-        # x_range define el dx implícito basado en la malla
+    def calculate_volume(self, Z, x_range, y_range, points):
+        # Usamos regla del trapecio sobre la malla cuadrada (más robusto)
+        x_axis = np.linspace(x_range[0], x_range[1], points)
+        y_axis = np.linspace(y_range[0], y_range[1], points)
+        Z_clean = np.nan_to_num(Z, nan=0.0)
+        return np.trapz(np.trapz(Z_clean, x=x_axis, axis=1), x=y_axis)
+
+# ==========================================
+# INTERFAZ GRÁFICA (Frontend)
+# ==========================================
+class App3D:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Calculadora 3D - Edición Profesional")
+        self.root.geometry("1280x850")
+        self.root.state('zoomed')
         
-        x_axis = np.linspace(self.x_range[0], self.x_range[1], self.points)
-        y_axis = np.linspace(self.y_range[0], self.y_range[1], self.points)
+        self.backend = SurfaceBackend()
 
-        # Primera integral respecto a x (obtenemos área transversal para cada y)
-        # axis=1 corresponde a las columnas (variación en x)
-        integral_x = np.trapz(self.Z, x=x_axis, axis=1)
+        # Layout Principal
+        self.frame_left = tk.Frame(root, width=340, bg="#f4f6f9", padx=15, pady=15)
+        self.frame_left.pack(side=tk.LEFT, fill=tk.Y)
         
-        # Segunda integral respecto a y (sumamos las áreas para obtener volumen)
-        volume = np.trapz(integral_x, x=y_axis)
+        self.frame_right = tk.Frame(root, bg="white")
+        self.frame_right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        self._init_ui()
+        self._init_plot()
+
+    def _init_ui(self):
+        # Header
+        tk.Label(self.frame_left, text="Calculadora 3D", font=("Segoe UI", 20, "bold"), bg="#f4f6f9", fg="#2c3e50").pack(pady=(0, 15))
         
-        return volume
+        # Función
+        tk.Label(self.frame_left, text="Función z = f(x,y):", bg="#f4f6f9", font=("Arial", 10, "bold")).pack(anchor="w")
+        self.entry_func = tk.Entry(self.frame_left, font=("Consolas", 14), bd=1, relief="solid")
+        self.entry_func.pack(fill=tk.X, pady=5, ipady=4)
+        self.entry_func.insert(0, "x**2 + y**2")
 
-    def plot_surface(self, volume_val):
-        """
-        Genera y muestra el gráfico 3D.
-        """
-        fig = plt.figure(figsize=(12, 8))
-        ax = fig.add_subplot(111, projection='3d')
+        # Teclado
+        self._build_keypad()
 
-        # Graficar superficie
-        surf = ax.plot_surface(self.X, self.Y, self.Z, cmap=cm.viridis, 
-                               linewidth=0, antialiased=False, alpha=0.8)
+        # Separador
+        ttk.Separator(self.frame_left, orient='horizontal').pack(fill='x', pady=15)
 
-        # Elementos estéticos
-        fig.colorbar(surf, shrink=0.5, aspect=5, label='f(x, y)')
-        ax.set_title(f'Superficie: z = {self.func_str}\nVolumen calculado: {volume_val:.4f}', fontsize=14)
-        ax.set_xlabel('Eje X')
-        ax.set_ylabel('Eje Y')
-        ax.set_zlabel('Eje Z')
-
-        # Ajustar vista inicial
-        ax.view_init(elev=30, azim=-60)
+        # Límites (RESTAURADOS LOS 4 CAMPOS)
+        tk.Label(self.frame_left, text="Dominio de Visualización:", bg="#f4f6f9", font=("Arial", 10, "bold")).pack(anchor="w")
         
-        print("[INFO] Generando gráfico...")
-        plt.show()
+        f_lims = tk.Frame(self.frame_left, bg="#f4f6f9")
+        f_lims.pack(fill=tk.X, pady=5)
+        
+        self.e_xmin = self._make_entry(f_lims, "X Min:", "-3", 0)
+        self.e_xmax = self._make_entry(f_lims, "X Max:", "3", 1)
+        self.e_ymin = self._make_entry(f_lims, "Y Min:", "-3", 2)
+        self.e_ymax = self._make_entry(f_lims, "Y Max:", "3", 3)
 
-def get_float_input(prompt):
-    """Validador simple de entrada numérica."""
-    while True:
+        # Opciones
+        ttk.Separator(self.frame_left, orient='horizontal').pack(fill='x', pady=15)
+        tk.Label(self.frame_left, text="Opciones de Renderizado:", bg="#f4f6f9", font=("Arial", 10, "bold")).pack(anchor="w")
+        
+        self.var_circular = tk.BooleanVar(value=True)
+        cb_circ = tk.Checkbutton(self.frame_left, text="Corte Circular (Polar Perfecto)", variable=self.var_circular, bg="#f4f6f9", command=self.procesar)
+        cb_circ.pack(anchor="w")
+
+        self.var_grid = tk.BooleanVar(value=True)
+        cb_grid = tk.Checkbutton(self.frame_left, text="Mostrar Rejilla (Wireframe)", variable=self.var_grid, bg="#f4f6f9", command=self.procesar)
+        cb_grid.pack(anchor="w")
+
+        # Botón Acción
+        btn = tk.Button(self.frame_left, text="GRAFICAR", bg="#2980b9", fg="white", font=("Segoe UI", 12, "bold"), 
+                        command=self.procesar, cursor="hand2")
+        btn.pack(fill=tk.X, pady=20, ipady=5)
+
+        # Resultados
+        self.lbl_vol = tk.Label(self.frame_left, text="Volumen: ---", bg="white", fg="#333", font=("Consolas", 12), relief="solid", bd=1, pady=10)
+        self.lbl_vol.pack(fill=tk.X)
+
+    def _build_keypad(self):
+        f = tk.Frame(self.frame_left, bg="#f4f6f9")
+        f.pack(fill=tk.X, pady=5)
+        keys = [
+            ('x', 'x'), ('y', 'y'), ('+', ' + '), ('CLR', 'CLR'),
+            ('sin', 'sin()'), ('cos', 'cos()'), ('-', ' - '), ('/', ' / '),
+            ('x²', '**2'), ('√', 'sqrt()'), ('*', ' * '), ('(', '('),
+            ('e', 'exp()'), ('^', '**'), ('π', 'pi'), (')', ')'),
+        ]
+        for i, (txt, val) in enumerate(keys):
+            b = tk.Button(f, text=txt, width=4, bg="white" if val!='CLR' else "#e74c3c", 
+                          fg="black" if val!='CLR' else "white", font=("Arial", 9, "bold"),
+                          command=lambda v=val: self.press_key(v))
+            b.grid(row=i//4, column=i%4, padx=2, pady=2, sticky="nsew")
+        for i in range(4): f.grid_columnconfigure(i, weight=1)
+
+    def _make_entry(self, p, txt, val, row):
+        tk.Label(p, text=txt, bg="#f4f6f9", width=6, anchor="e").grid(row=row, column=0, padx=2, pady=2)
+        e = tk.Entry(p, width=8, justify="center")
+        e.insert(0, val)
+        e.grid(row=row, column=1, padx=5, pady=2, sticky="ew")
+        return e
+
+    def press_key(self, v):
+        if v == 'CLR': self.entry_func.delete(0, tk.END); return
+        idx = self.entry_func.index(tk.INSERT)
+        self.entry_func.insert(idx, v)
+        self.entry_func.focus()
+        if v.endswith('()'): self.entry_func.icursor(idx + len(v) - 1)
+
+    def _init_plot(self):
+        self.fig = plt.figure(figsize=(5, 5), dpi=100)
+        self.ax = self.fig.add_subplot(111, projection='3d')
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.frame_right)
+        self.canvas.draw()
+        NavigationToolbar2Tk(self.canvas, self.frame_right).update()
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=1)
+
+    def procesar(self):
+        func = self.entry_func.get()
         try:
-            return float(input(prompt))
-        except ValueError:
-            print("Por favor, ingrese un número válido.")
+            # Obtener los 4 límites
+            xmin = float(self.e_xmin.get())
+            xmax = float(self.e_xmax.get())
+            ymin = float(self.e_ymin.get())
+            ymax = float(self.e_ymax.get())
+            
+            if xmin >= xmax or ymin >= ymax:
+                raise ValueError("Los límites mínimos deben ser menores a los máximos.")
+                
+            lims_rect = (xmin, xmax, ymin, ymax)
+        except: 
+            messagebox.showerror("Error", "Revise los valores numéricos de los límites."); return
 
-def main():
-    print("--- Calculadora de Superficies y Volúmenes 3D ---")
-    print("Sintaxis soportada: +, -, *, /, **, sin, cos, exp, sqrt, log, etc.")
-    print("Ejemplo de función: sin(sqrt(x**2 + y**2))")
-    print("-" * 50)
+        ok, msg = self.backend.parse_function(func)
+        if not ok: messagebox.showerror("Error", msg); return
 
-    # 1. Entrada de datos
-    func_input = input("Ingrese la función f(x, y): ").strip()
-    
-    print("\nDefinición del dominio [a, b] x [c, d]:")
-    x_min = get_float_input("Límite inferior X (a): ")
-    x_max = get_float_input("Límite superior X (b): ")
-    y_min = get_float_input("Límite inferior Y (c): ")
-    y_max = get_float_input("Límite superior Y (d): ")
+        try:
+            # 1. CÁLCULO (Siempre Rectangular y Exacto)
+            pts_calc = 100
+            Xc, Yc, Zc = self.backend.get_cartesian_data((xmin, xmax), (ymin, ymax), pts_calc)
+            
+            # Para el volumen, si el modo circular está activado, enmascaramos lo de afuera
+            # Si no, calculamos el volumen del cubo completo
+            if self.var_circular.get():
+                # Radio efectivo basado en el máximo alcance para cálculo de volumen
+                r_eff = max(abs(xmin), abs(xmax), abs(ymin), abs(ymax))
+                mask = Xc**2 + Yc**2 > r_eff**2
+                Z_vol = Zc.copy()
+                Z_vol[mask] = 0 
+                vol = self.backend.calculate_volume(Z_vol, (xmin, xmax), (ymin, ymax), pts_calc)
+            else:
+                vol = self.backend.calculate_volume(Zc, (xmin, xmax), (ymin, ymax), pts_calc)
 
-    # Validaciones básicas de dominio
-    if x_min >= x_max or y_min >= y_max:
-        print("[ERROR] Los límites inferiores deben ser menores que los superiores.")
-        return
+            self.lbl_vol.config(text=f"Volumen Aprox: {vol:.4f} u³")
 
-    # 2. Instanciación y Procesamiento
-    analyzer = SurfaceAnalyzer(func_input, (x_min, x_max), (y_min, y_max), points=100)
-    
-    # 3. Ejecución de pasos
-    analyzer.parse_function()
-    analyzer.generate_mesh()
-    
-    # 4. Cálculo numérico
-    vol = analyzer.calculate_volume_trapezoidal()
-    print(f"\n[RESULTADO] El volumen aproximado bajo la superficie es: {vol:.6f}")
-    
-    # 5. Visualización
-    analyzer.plot_surface(vol)
+            # 2. GRAFICACIÓN
+            if self.var_circular.get():
+                # Para graficar en polar, usamos el radio máximo de los límites para asegurar cobertura
+                r_plot = max(abs(xmin), abs(xmax), abs(ymin), abs(ymax))
+                X_plot, Y_plot, Z_plot = self.backend.get_polar_data(r_plot, points=80)
+            else:
+                # Graficación rectangular exacta
+                X_plot, Y_plot, Z_plot = Xc, Yc, Zc
+
+            self.graficar(X_plot, Y_plot, Z_plot, lims_rect)
+
+        except Exception as e:
+            messagebox.showerror("Error Matemático", str(e))
+
+    def graficar(self, X, Y, Z, lims_rect):
+        self.ax.clear()
+        xmin, xmax, ymin, ymax = lims_rect
+        
+        # Estilo
+        show_grid = self.var_grid.get()
+        edge_color = 'black' if show_grid else None
+        line_width = 0.2 if show_grid else 0
+        
+        # Superficie
+        self.ax.plot_surface(X, Y, Z, cmap='cool', edgecolor=edge_color, linewidth=line_width, alpha=0.9, rstride=1, cstride=1)
+
+        # Decoración GeoGebra: Límites visuales basados en lo que ingresó el usuario
+        max_val = max(abs(xmin), abs(xmax), abs(ymin), abs(ymax)) * 1.1
+        
+        self.ax.plot([-max_val, max_val], [0, 0], [0, 0], 'k-', lw=1.5) # Eje X
+        self.ax.plot([0, 0], [-max_val, max_val], [0, 0], 'k-', lw=1.5) # Eje Y
+        
+        self.ax.set_xlim(-max_val, max_val)
+        self.ax.set_ylim(-max_val, max_val)
+        self.ax.set_zlabel('Z')
+        self.ax.view_init(elev=30, azim=-45)
+        self.canvas.draw()
 
 if __name__ == "__main__":
-    main()
+    root = tk.Tk()
+    App3D(root)
+    root.mainloop()
